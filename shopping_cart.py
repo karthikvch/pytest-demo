@@ -2,6 +2,9 @@ from typing import List
 
 
 class ShoppingCart:
+    def __init__(self):
+        self.items = None
+
     def __int__(self) -> None:
         self.items: List[str] = []
 
