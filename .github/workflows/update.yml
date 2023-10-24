@@ -1,30 +1,105 @@
-name: Push Event Workflow
+# File: .github/workflows/ci.yml
+name: project demo
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
-on: push
+permissions:
+  content: read
 
 jobs:
-  unit-testing:
+  demo_test:
+    env:
+      COVERAGE_ENABLED: true
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     steps:
-    - name : Checkout code
-      uses : actions/checkout@v2
+      - uses: actions/checkout@v3
+      - uses: mamba-org/provision-with-micromamba@v15
+        with:
+          environment-file: environment.yml  # includes pandoc
+          cache-download: true
+          channels: conda-forge
+      - name: Install htmlq
+        if: ${{ env.COVERAGE_ENABLED }}
+        uses: baptiste0928/cargo-install@v2
+        with:
+          crate: htmlq
+          cache-key: cargo-coverage
+      - run: cargo install htmlq
+        if: ${{ env.COVERAGE_ENABLED }}
+      - run: |
+          # Produce the HTML report.
+          pytest --cov=demo --cov-report=html --cov-report=xml --cov-branch -m "demo"
 
-    - name: Install dependencies
-      run: |
-          python -m pip install --upgrade pip
-          #if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install -r requirements.txt
-    - name: Lint with Ruff
-      run: |
-          pip install ruff
-          #ruff --format=github --target-version=py310
-      continue-on-error: true
-
-    - name: Test with pytest
-      run: |
-           coverage run -m pytest  -v -s
-
-    - name: Generate Coverage Report
-      run: |
-              coverage report -m
+          if [[ ${COVERAGE_ENABLED} ]]; then
+            # Extract the top header of the pytest HTML report.
+            # Passes the HTML through htmlq, extracting the first H1 displayed.
+            # Uses tr to delete breaklines and squeeze-repeats blank spaces,
+            # saving space - this is used for an HTTP REST request to GitHub API.
+            COV_HEADER=$(cat htmlcov/index.html | htmlq --pretty 'header > div > h1:first-of-type' | tr -d '\n' | tr -s ' ')          
+  
+            # Extract the table of the pytest HTML report.
+            # Passes the HTML through htmlq, extracting the table element.
+            # Uses tr to delete breaklines and squeeze-repeats blank spaces.
+            # Then calls sed with an expression that replaces the HTML a
+            # elements by only its text.
+            COV_TABLE=$(cat htmlcov/index.html | htmlq --pretty 'table' | tr -d '\n' | tr -s ' ' | sed 's|<a[^>]*>\([^<]*\)</a>|\1|g')
+  
+            # Produce a simplified HTML report.
+            echo "${COV_HEADER}${COV_TABLE}" > coverage.html
+  
+            # Now simply use pandoc to convert HTML to Markdown.
+            pandoc --from html --to 'markdown_strict+pipe_tables' coverage.html -o coverage.md
+          fi
+      - name: Public coverage (stdout)
+        # Publish the coverage reports in only one matrix job run.
+        # Only run if **NOT** running in a pull request (see step below).
+        if: ${{ github.event_name != 'pull_request' && env.COVERAGE_ENABLED }}
+        run: |
+                    cat coverage.md
+      - name: Publish coverage reports (bot)
+        # Only run if running in a pull request.
+        # See for more: https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-using-contexts
+        if: ${{ github.event_name == 'pull_request' && env.COVERAGE_ENABLED }}
+        # Comment on an issue or pull request using GH Actions tooling:
+        # https://github.com/actions/github-script#comment-on-an-issue
+        uses: actions/github-script@v6
+        id: coverage-report
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          # Based on: https://github.com/actions/github-script/blob/060d68304cc19ea84d828af10e34b9c6ca7bdb31/.github/workflows/pull-request-test.yml
+          script: |
+            // Get the existing comments.
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.number,
+            })            
+        
+            // Find any comment already made by the bot.
+            const botComment = comments.find(comment => comment.user.id === 41898282)
+            const fs = require("fs").promises
+            const commentBody = await fs.readFile("coverage.md", "utf8")
+        
+            if (botComment) {
+              console.log(`Updating comment in ${context.repo.owner}/${context.repo.repo}, comment ID: ${botComment.id}`)
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              })
+            } else {
+              console.log(`Creating comment in ${context.repo.owner}/${context.repo.repo}`)
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              })
+            }
