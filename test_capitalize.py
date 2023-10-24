@@ -7,3 +7,4 @@ def capital_case(x):
 def test_capital_case():
     x = capital_case('semaphore')
     assert x == 'Semaphore'
+    pass
